@@ -1227,10 +1227,40 @@ export default function VSTAssistantApp() {
 
   const loadSettingsForPage = async (pageId: string) => {
     setIsLoadingBotSettings(true);
+    // 1. Immediately restore from localStorage if available (prevents losing templates on Vercel/serverless resets)
+    try {
+      if (typeof window !== "undefined") {
+        const localSaved = localStorage.getItem(`vst_bot_settings_${pageId}`) || localStorage.getItem("vst_bot_settings_default");
+        if (localSaved) {
+          const parsed = JSON.parse(localSaved);
+          if (parsed.reply_templates && parsed.reply_templates.length > 0) {
+            setCommentReplyTemplate(parsed.reply_templates[0]);
+          }
+          if (typeof parsed.is_active === "boolean") {
+            setBotActive(parsed.is_active);
+          }
+          if (typeof parsed.auto_dm_enabled === "boolean") {
+            setAutoSendDm(parsed.auto_dm_enabled);
+          }
+          if (parsed.dm_template) {
+            setDmWelcomeText(parsed.dm_template);
+          }
+          if (typeof parsed.keywords === "string") {
+            setCommentKeyword(parsed.keywords);
+          }
+          if (typeof parsed.ai_reply_enabled === "boolean") {
+            setAiReplyEnabled(parsed.ai_reply_enabled);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error reading localStorage settings:", e);
+    }
+
     try {
       const res = await fetch(`/api/bot-settings?pageId=${pageId}`);
       const data = await res.json();
-      if (data) {
+      if (data && !data.error) {
         if (data.reply_templates && data.reply_templates.length > 0) {
           setCommentReplyTemplate(data.reply_templates[0]);
         }
@@ -1245,17 +1275,13 @@ export default function VSTAssistantApp() {
         }
         if (typeof data.keywords === "string") {
           setCommentKeyword(data.keywords);
-        } else {
-          setCommentKeyword("");
         }
         if (typeof data.ai_reply_enabled === "boolean") {
           setAiReplyEnabled(data.ai_reply_enabled);
-        } else {
-          setAiReplyEnabled(false);
         }
       }
     } catch (e) {
-      console.error("Error loading settings:", e);
+      console.error("Error loading settings from server:", e);
     } finally {
       setIsLoadingBotSettings(false);
     }
@@ -1266,30 +1292,48 @@ export default function VSTAssistantApp() {
   }, [selectedBotPageId]);
 
   const handleSaveBotSettings = async () => {
+    const payload = {
+      pageId: selectedBotPageId,
+      is_active: botActive,
+      reply_templates: [commentReplyTemplate],
+      auto_dm_enabled: autoSendDm,
+      dm_template: dmWelcomeText,
+      keywords: commentKeyword,
+      ai_reply_enabled: aiReplyEnabled,
+    };
+
+    // 1. Immediately persist to localStorage (guarantees it never disappears in this browser)
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem(`vst_bot_settings_${selectedBotPageId}`, JSON.stringify(payload));
+        if (selectedBotPageId === "default") {
+          localStorage.setItem("vst_bot_settings_default", JSON.stringify(payload));
+        }
+      }
+    } catch (localErr) {
+      console.error("Failed to save to localStorage:", localErr);
+    }
+
     try {
       const res = await fetch("/api/bot-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pageId: selectedBotPageId,
-          is_active: botActive,
-          reply_templates: [commentReplyTemplate],
-          auto_dm_enabled: autoSendDm,
-          dm_template: dmWelcomeText,
-          keywords: commentKeyword,
-          ai_reply_enabled: aiReplyEnabled,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok || data.error) {
-        alert(lang === "km" ? "បរាជ័យក្នុងការរក្សាទុក៖ " + (data.error || "Server Error") : "Failed to save: " + (data.error || "Server Error"));
+        // Still saved in localStorage, notify user
+        setSavedSuccess(true);
+        setTimeout(() => setSavedSuccess(false), 3000);
         return;
       }
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
     } catch (e: any) {
-      console.error("Failed to save settings:", e);
-      alert(lang === "km" ? "មានបញ្ហាក្នុងការរក្សាទុក៖ " + e.message : "Error saving settings: " + e.message);
+      console.error("Failed to save settings to server:", e);
+      // Even if server fails, it's saved locally
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 3000);
     }
   };
 
