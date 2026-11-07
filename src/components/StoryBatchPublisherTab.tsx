@@ -98,6 +98,77 @@ const OFFICIAL_COMPANY_PAGES: ConnectedPage[] = [
   { id: "100236959278588", name: "The Magic +168", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
 ];
 
+/**
+ * Automatically compress/resize images client-side to prevent Vercel 4.5MB payload limit
+ * (Converts 5MB-20MB mobile camera photos into crisp ~600KB Facebook-ready JPEGs)
+ */
+async function optimizePhotoForWeb(file: File): Promise<File> {
+  if (typeof window === "undefined" || !file.type.startsWith("image/") || file.size <= 1.5 * 1024 * 1024) {
+    return file;
+  }
+
+  return new Promise((resolve) => {
+    try {
+      const img = new window.Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const canvas = document.createElement("canvas");
+        let width = img.width;
+        let height = img.height;
+
+        // Facebook recommended max dimension is 2048px (crisp HD quality)
+        const MAX_DIM = 2048;
+        if (width > MAX_DIM || height > MAX_DIM) {
+          if (width > height) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          } else {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(file);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob(
+          (blob) => {
+            if (!blob || blob.size >= file.size) {
+              resolve(file);
+            } else {
+              const safeName = file.name.replace(/\.[^/.]+$/, "") + ".jpg";
+              const optimizedFile = new File([blob], safeName, {
+                type: "image/jpeg",
+                lastModified: Date.now(),
+              });
+              resolve(optimizedFile);
+            }
+          },
+          "image/jpeg",
+          0.85
+        );
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(file);
+      };
+
+      img.src = url;
+    } catch {
+      resolve(file);
+    }
+  });
+}
+
 export default function StoryBatchPublisherTab({
   lang,
   connectedPages = [],
@@ -247,16 +318,26 @@ export default function StoryBatchPublisherTab({
   }, []);
 
   // Handle Multi-file selection (both photos & videos)
-  const handleFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
     const newItems: BatchMediaItem[] = [];
-    Array.from(files).forEach((file, idx) => {
-      const isVid = file.type.startsWith("video/");
-      const isImg = file.type.startsWith("image/");
+    for (let idx = 0; idx < files.length; idx++) {
+      const rawFile = files[idx];
+      const isVid = rawFile.type.startsWith("video/");
+      const isImg = rawFile.type.startsWith("image/");
 
-      if (!isVid && !isImg) return;
+      if (!isVid && !isImg) continue;
+
+      let file = rawFile;
+      if (isImg && rawFile.size > 1.5 * 1024 * 1024) {
+        try {
+          file = await optimizePhotoForWeb(rawFile);
+        } catch {
+          file = rawFile;
+        }
+      }
 
       const url = URL.createObjectURL(file);
       const cleanName = file.name.replace(/\.[^/.]+$/, "");
@@ -273,7 +354,7 @@ export default function StoryBatchPublisherTab({
         title: cleanName,
         status: "idle",
       });
-    });
+    }
 
     setBatchItems((prev) => [...prev, ...newItems]);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -614,9 +695,14 @@ export default function StoryBatchPublisherTab({
 
           // C. DIRECT UPLOAD FOR PHOTOS OR SMALL FILES (< 3MB)
           } else {
+            let uploadFile = item.file;
+            if (item.mediaType === "photo" && uploadFile.size > 1.5 * 1024 * 1024) {
+              uploadFile = await optimizePhotoForWeb(uploadFile);
+            }
+
             const formData = new FormData();
             formData.append("pageId", pId);
-            formData.append("file", item.file, item.file.name);
+            formData.append("file", uploadFile, uploadFile.name);
             formData.append("mediaType", item.mediaType);
             formData.append("caption", item.caption || "");
             formData.append("title", item.title || "");
