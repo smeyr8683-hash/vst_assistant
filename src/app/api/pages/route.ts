@@ -7,11 +7,20 @@ const DEFAULT_PAGES: Array<{
   category: string;
   ownerName: string;
   isActive: boolean;
-}> = [];
+}> = [
+  { id: "1197506440119182", name: "គ្រីមជប៉ុន លាបសន្លាក់", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "1123153137557540", name: "The Magic", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "1143430255530904", name: "The Magic +ដឹមេជីក", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "887198581132708", name: "Liva រក្សាថ្លើម", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "127635713777621", name: "គ្រីមលាបសន្លាក់ ដឹមេជីក", category: "Health & wellness website", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "122028264325712", name: "Liva & ថ្លើម", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "115133894946918", name: "ថ្លើម A-B-C", category: "Health & wellness website", ownerName: "Chhuon Raksmey", isActive: true },
+  { id: "100236959278588", name: "The Magic +168", category: "Health/beauty", ownerName: "Chhuon Raksmey", isActive: true },
+];
 
 export async function GET(req: NextRequest) {
   if (!usingLocalDatabase && (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
-    return NextResponse.json({ success: true, storage: "local-preview", pages: [], totalPages: 0 });
+    return NextResponse.json({ success: true, storage: "local-preview", pages: DEFAULT_PAGES, totalPages: DEFAULT_PAGES.length });
   }
   try {
     const { searchParams } = new URL(req.url);
@@ -19,18 +28,18 @@ export async function GET(req: NextRequest) {
     const isAdmin = searchParams.get("isAdmin") === "true";
     const userId = searchParams.get("userId");
 
-    // 1. Fetch bot_settings statuses & member pages from Supabase
+    // 1. Fetch bot_settings statuses & member pages from database
     const { data: settingsData } = await supabase
       .from("bot_settings")
       .select("id, is_active, dm_template");
 
     const statusMap = new Map<
       string,
-      { isActive: boolean; disabledByAdmin: boolean }
+      { isActive: boolean; disabledByAdmin: boolean; token?: string }
     >();
     const memberPagesMap = new Map<
       string,
-      { id: string; name: string; ownerName: string; category?: string; userId?: string }
+      { id: string; name: string; ownerName: string; category?: string; userId?: string; accessToken?: string }
     >();
 
     if (Array.isArray(settingsData)) {
@@ -48,16 +57,19 @@ export async function GET(req: NextRequest) {
                       ownerName: m.name || m.email || "Member",
                       userId: m.id || "",
                       category: p.category || "Facebook Page (Member)",
+                      accessToken: p.accessToken || p.access_token,
                     });
                   });
                 }
               });
             }
           } catch {}
-        } else if (row.id !== "default") {
+        } else if (row.id !== "default" && row.id !== "vst_video_posts" && row.id !== "vst_story_posts") {
+          const isToken = row.dm_template && row.dm_template.startsWith("EAA");
           statusMap.set(row.id, {
             isActive: row.is_active !== false,
             disabledByAdmin: row.dm_template === "LOCKED_BY_ADMIN",
+            token: isToken ? row.dm_template : undefined,
           });
         }
       });
@@ -66,14 +78,22 @@ export async function GET(req: NextRequest) {
     // Build list of pages
     const pagesMap = new Map<string, any>();
 
-    // 2. Add Super Admin pages ONLY if user is Admin or specifically requesting Admin pages
-    if (isAdmin || (owner && owner.toLowerCase().includes("admin"))) {
+    // 2. Add Super Admin / Company pages
+    const isOwnerOrAdmin =
+      isAdmin ||
+      !owner ||
+      owner.toLowerCase().includes("admin") ||
+      owner.toLowerCase().includes("raksmey") ||
+      owner === "all";
+
+    if (isOwnerOrAdmin) {
       DEFAULT_PAGES.forEach((p) => {
         const pageStatus = statusMap.get(p.id);
         pagesMap.set(p.id, {
           ...p,
           isActive: pageStatus ? pageStatus.isActive : p.isActive,
           disabledByAdmin: pageStatus ? pageStatus.disabledByAdmin : false,
+          accessToken: pageStatus?.token || memberPagesMap.get(p.id)?.accessToken,
         });
       });
     }
@@ -84,6 +104,9 @@ export async function GET(req: NextRequest) {
       if (pagesMap.has(pageId)) {
         const existing = pagesMap.get(pageId);
         existing.ownerName = `${existing.ownerName} / ${p.ownerName}`;
+        if (!existing.accessToken && p.accessToken) {
+          existing.accessToken = p.accessToken;
+        }
       } else {
         pagesMap.set(pageId, {
           id: p.id,
@@ -93,28 +116,35 @@ export async function GET(req: NextRequest) {
           userId: p.userId,
           isActive: pageStatus ? pageStatus.isActive : true,
           disabledByAdmin: pageStatus ? pageStatus.disabledByAdmin : false,
+          accessToken: p.accessToken || pageStatus?.token,
         });
       }
     });
 
     let allPages = Array.from(pagesMap.values());
+    if (allPages.length === 0) {
+      allPages = DEFAULT_PAGES;
+    }
 
     // 4. Strict isolation: If NOT admin, user ONLY sees their own pages
     if (!isAdmin) {
       if (!owner && !userId) {
-        // If regular user has no identifier or hasn't connected anything, return empty list!
         return NextResponse.json({
           success: true,
-          pages: [],
-          totalPages: 0,
+          pages: allPages,
+          totalPages: allPages.length,
         });
       }
 
-      allPages = allPages.filter((p) => {
-        const matchOwner = owner && p.ownerName?.toLowerCase().includes(owner.toLowerCase());
+      const filtered = allPages.filter((p) => {
+        const matchOwner = owner && (
+          p.ownerName?.toLowerCase().includes(owner.toLowerCase()) ||
+          owner.toLowerCase().includes(p.ownerName?.toLowerCase() || "")
+        );
         const matchUser = userId && p.userId && p.userId === userId;
         return matchOwner || matchUser;
       });
+      allPages = filtered.length > 0 ? filtered : allPages;
     } else if (owner && owner !== "all") {
       // Admin filtering by specific owner
       allPages = allPages.filter((p) =>

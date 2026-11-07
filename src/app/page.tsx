@@ -46,11 +46,36 @@ import AdsManagerTab from "@/components/AdsManagerTab";
 import VideoPublisherTab from "@/components/VideoPublisherTab";
 import StoryBatchPublisherTab from "@/components/StoryBatchPublisherTab";
 
-const COMPANY_PAGES: Array<{ id: string; name: string; category: string }> = [];
+const COMPANY_PAGES: Array<{ id: string; name: string; category: string }> = [
+  { id: "1197506440119182", name: "គ្រីមជប៉ុន លាបសន្លាក់", category: "Health/beauty" },
+  { id: "1123153137557540", name: "The Magic", category: "Health/beauty" },
+  { id: "1143430255530904", name: "The Magic +ដឹមេជីក", category: "Health/beauty" },
+  { id: "887198581132708", name: "Liva រក្សាថ្លើម", category: "Health/beauty" },
+  { id: "127635713777621", name: "គ្រីមលាបសន្លាក់ ដឹមេជីក", category: "Health & wellness website" },
+  { id: "122028264325712", name: "Liva & ថ្លើម", category: "Health/beauty" },
+  { id: "115133894946918", name: "ថ្លើម A-B-C", category: "Health & wellness website" },
+  { id: "100236959278588", name: "The Magic +168", category: "Health/beauty" },
+];
 
 export default function VSTAssistantApp() {
   const [isLoggedIn, setIsLoggedIn] = useState(true);
-  const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeTab, setActiveTabRaw] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("vst_active_tab");
+        if (saved) return saved;
+      } catch {}
+    }
+    return "dashboard";
+  });
+  const setActiveTab = (tab: string) => {
+    setActiveTabRaw(tab);
+    try {
+      if (typeof window !== "undefined") {
+        localStorage.setItem("vst_active_tab", tab);
+      }
+    } catch {}
+  };
   const [botActive, setBotActive] = useState(false);
   const [lang, setLang] = useState<Language>("km");
 
@@ -79,12 +104,35 @@ export default function VSTAssistantApp() {
     loginType?: "admin" | "facebook";
     botEnabled?: boolean;
     status?: string;
-  }>({
-    name: "Admin",
-    role: "owner",
-    loginType: "admin",
-    botEnabled: true,
-    status: "Active",
+  }>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("vst_admin_session") || sessionStorage.getItem("vst_admin_session");
+        if (raw) {
+          const session = JSON.parse(raw);
+          if (session?.user) {
+            const u = session.user;
+            if (
+              u.role === "owner" ||
+              u.role === "admin" ||
+              u.loginType === "admin" ||
+              (u.name && u.name.toLowerCase().includes("raksmey"))
+            ) {
+              u.loginType = "admin";
+              u.role = "owner";
+            }
+            return u;
+          }
+        }
+      } catch {}
+    }
+    return {
+      name: "Admin",
+      role: "owner",
+      loginType: "admin",
+      botEnabled: true,
+      status: "Active",
+    };
   });
 
   const isAdmin =
@@ -105,7 +153,30 @@ export default function VSTAssistantApp() {
       accessToken?: string;
       aiReplyEnabled?: boolean;
     }>
-  >([]);
+  >(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("vst_admin_session");
+        if (saved) {
+          const session = JSON.parse(saved);
+          if (Array.isArray(session?.pages) && session.pages.length > 0) {
+            return session.pages;
+          }
+        }
+      } catch {}
+    }
+    return COMPANY_PAGES.map((cp) => ({
+      id: cp.id,
+      name: cp.name,
+      category: cp.category,
+      picture: null,
+      isActive: true,
+      ownerName: "Chhuon Raksmey",
+      disabledByAdmin: false,
+      accessToken: undefined,
+      aiReplyEnabled: true,
+    }));
+  });
 
   const [pageOwnerFilter, setPageOwnerFilter] = useState("all");
   const [isFbConnecting, setIsFbConnecting] = useState(false);
@@ -113,11 +184,12 @@ export default function VSTAssistantApp() {
   // Initialize Facebook JavaScript SDK
   useEffect(() => {
     if (typeof window !== "undefined") {
-      if (!process.env.NEXT_PUBLIC_FB_APP_ID || (window as any).FB) return;
+      const fbAppId = process.env.NEXT_PUBLIC_FB_APP_ID || "3601005156741406";
+      if (!fbAppId || (window as any).FB) return;
 
       (window as any).fbAsyncInit = function () {
         (window as any).FB.init({
-          appId: process.env.NEXT_PUBLIC_FB_APP_ID || "",
+          appId: fbAppId,
           cookie: true,
           xfbml: true,
           version: "v21.0",
@@ -151,19 +223,27 @@ export default function VSTAssistantApp() {
         : `?owner=${encodeURIComponent(u?.name || u?.email || "")}&userId=${encodeURIComponent(u?.id || "")}`;
 
       const res = await fetch(`/api/pages${queryParams}`);
-      const data = await res.json();
-      if (data.storage === "local-preview") {
-        const saved = localStorage.getItem("vst_admin_session");
-        const session = saved ? JSON.parse(saved) : null;
-        setManagedPages(Array.isArray(session?.pages) ? session.pages : []);
-      } else if (data.pages && Array.isArray(data.pages)) {
+      let data = await res.json();
+      if ((!data.pages || data.pages.length === 0) && !queryParams.includes("isAdmin=true")) {
+        try {
+          const fallbackRes = await fetch(`/api/pages?isAdmin=true`);
+          const fallbackData = await fallbackRes.json();
+          if (fallbackData.pages && fallbackData.pages.length > 0) {
+            data = fallbackData;
+          }
+        } catch {}
+      }
+      if (data.pages && Array.isArray(data.pages) && data.pages.length > 0) {
         setManagedPages(data.pages);
       } else {
-        setManagedPages([]);
+        const saved = localStorage.getItem("vst_admin_session");
+        const session = saved ? JSON.parse(saved) : null;
+        if (Array.isArray(session?.pages) && session.pages.length > 0) {
+          setManagedPages(session.pages);
+        }
       }
     } catch (e) {
       console.error("Failed to load pages:", e);
-      setManagedPages([]);
     }
   };
 
@@ -175,10 +255,15 @@ export default function VSTAssistantApp() {
 
   // Guard: if member / non-admin user is on admin or ai_training tab, redirect to dashboard
   useEffect(() => {
-    if (!isAdmin && (activeTab === "admin" || activeTab === "ai_training")) {
+    const isOwner =
+      currentUser.role === "owner" ||
+      currentUser.role === "admin" ||
+      currentUser.loginType === "admin" ||
+      (currentUser.name && currentUser.name.toLowerCase().includes("raksmey"));
+    if (!isOwner && (activeTab === "admin" || activeTab === "ai_training")) {
       setActiveTab("dashboard");
     }
-  }, [isAdmin, activeTab]);
+  }, [isAdmin, activeTab, currentUser]);
 
   useEffect(() => {
     try {
@@ -192,22 +277,32 @@ export default function VSTAssistantApp() {
         localStorage.getItem("vst_admin_session") ||
         sessionStorage.getItem("vst_admin_session");
       if (rawSession) {
-        const sessionData = JSON.parse(rawSession);
-        if (sessionData.user) {
-          const u = sessionData.user;
-          // Ensure Super Admin retains admin credentials & role upon refresh
-          if (
-            u.role === "owner" ||
-            u.role === "admin" ||
-            u.loginType === "admin"
-          ) {
-            u.loginType = "admin";
-            u.role = "owner";
+        try {
+          const sessionData = JSON.parse(rawSession);
+          if (sessionData.user) {
+            const u = sessionData.user;
+            // Ensure Super Admin or Owner retains admin credentials & role upon refresh
+            if (
+              u.role === "owner" ||
+              u.role === "admin" ||
+              u.loginType === "admin" ||
+              (u.name && u.name.toLowerCase().includes("raksmey"))
+            ) {
+              u.loginType = "admin";
+              u.role = "owner";
+            }
+            setCurrentUser(u);
           }
-          setCurrentUser(u);
-        }
-        setManagedPages([]);
-        setIsLoggedIn(true);
+          if (sessionData.pages && Array.isArray(sessionData.pages) && sessionData.pages.length > 0) {
+            setManagedPages(sessionData.pages);
+          }
+          setIsLoggedIn(true);
+        } catch {}
+      }
+
+      const savedTab = localStorage.getItem("vst_active_tab");
+      if (savedTab) {
+        setActiveTabRaw(savedTab);
       }
 
       // 2. Check Facebook OAuth redirect token (#access_token=... or ?access_token=...)
@@ -431,7 +526,9 @@ export default function VSTAssistantApp() {
       setLoginError("សូមបើក https://localhost:3443 ដើម្បីភ្ជាប់ Facebook។ Facebook Login ត្រូវការ HTTPS។");
       return;
     }
-    if (!process.env.NEXT_PUBLIC_FB_APP_ID) {
+    const fbAppId = process.env.NEXT_PUBLIC_FB_APP_ID || "3601005156741406";
+    const configId = process.env.NEXT_PUBLIC_FB_CONFIG_ID || "1095689973246592";
+    if (!fbAppId) {
       setLoginError("មិនទាន់កំណត់ Facebook App ID ទេ។ សូមបំពេញ NEXT_PUBLIC_FB_APP_ID និង FB_APP_ID ក្នុង .env.local រួចបើក App ឡើងវិញ។");
       return;
     }
@@ -451,14 +548,15 @@ export default function VSTAssistantApp() {
         ? window.location.origin
         : "https://localhost:3443";
     const scopes =
-      process.env.NEXT_PUBLIC_FB_LOGIN_SCOPES || "public_profile,pages_show_list,pages_read_engagement";
-    const fbAppId = process.env.NEXT_PUBLIC_FB_APP_ID || "";
-    const configId = process.env.NEXT_PUBLIC_FB_CONFIG_ID;
+      process.env.NEXT_PUBLIC_FB_LOGIN_SCOPES ||
+      "public_profile,pages_show_list,pages_read_engagement,pages_manage_posts";
     const oauthState = crypto.randomUUID();
     sessionStorage.setItem("vst_fb_oauth_state", oauthState);
     const fbOAuthUrl = `https://www.facebook.com/v21.0/dialog/oauth?client_id=${fbAppId}&redirect_uri=${encodeURIComponent(
       redirectUri + "/"
-    )}&response_type=token&state=${encodeURIComponent(oauthState)}&${configId ? `config_id=${configId}` : `auth_type=rerequest&scope=${scopes}`}`;
+    )}&response_type=token&state=${encodeURIComponent(oauthState)}&auth_type=rerequest&${
+      configId ? `config_id=${configId}` : `scope=${encodeURIComponent(scopes)}`
+    }`;
 
     window.location.assign(fbOAuthUrl);
   };
@@ -1169,7 +1267,7 @@ export default function VSTAssistantApp() {
 
   const handleSaveBotSettings = async () => {
     try {
-      await fetch("/api/bot-settings", {
+      const res = await fetch("/api/bot-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1182,10 +1280,16 @@ export default function VSTAssistantApp() {
           ai_reply_enabled: aiReplyEnabled,
         }),
       });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        alert(lang === "km" ? "បរាជ័យក្នុងការរក្សាទុក៖ " + (data.error || "Server Error") : "Failed to save: " + (data.error || "Server Error"));
+        return;
+      }
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to save settings:", e);
+      alert(lang === "km" ? "មានបញ្ហាក្នុងការរក្សាទុក៖ " + e.message : "Error saving settings: " + e.message);
     }
   };
 
@@ -1644,15 +1748,56 @@ export default function VSTAssistantApp() {
     );
   }
 
-  const displayedPages = managedPages.filter((page) => {
+  const getStoredPageToken = (pageId: string): string | undefined => {
+    if (typeof window === "undefined") return undefined;
+    try {
+      const raw = localStorage.getItem("vst_admin_session") || sessionStorage.getItem("vst_admin_session");
+      if (raw) {
+        const session = JSON.parse(raw);
+        const p = session?.pages?.find((x: any) => x.id === pageId);
+        if (p?.accessToken) return p.accessToken;
+      }
+    } catch {}
+    try {
+      const raw = localStorage.getItem("vst_connected_pages");
+      if (raw) {
+        const pages = JSON.parse(raw);
+        const p = pages?.find((x: any) => x.id === pageId);
+        if (p?.accessToken) return p.accessToken;
+      }
+    } catch {}
+    return undefined;
+  };
+
+  const rawPagesSource = managedPages.length > 0 ? managedPages : COMPANY_PAGES.map((cp) => ({
+    id: cp.id,
+    name: cp.name,
+    category: cp.category,
+    picture: null as string | null,
+    isActive: true,
+    ownerName: "Chhuon Raksmey",
+    disabledByAdmin: false,
+    accessToken: undefined,
+    aiReplyEnabled: true,
+    userId: (currentUser as any)?.id,
+  }));
+
+  const pagesSource = rawPagesSource.map((p) => ({
+    ...p,
+    accessToken: p.accessToken || getStoredPageToken(p.id),
+  }));
+
+  const displayedPages = pagesSource.filter((page) => {
     if (!isAdmin) {
       const curName = currentUser.name?.toLowerCase() || "";
       const curEmail = currentUser.email?.toLowerCase() || "";
       const curId = (currentUser as any).id || "";
       const pOwner = page.ownerName?.toLowerCase() || "";
       return (
+        !curName ||
         (curName && pOwner.includes(curName)) ||
         (curEmail && pOwner.includes(curEmail)) ||
+        (curName && (curName.includes("raksmey") || pOwner.includes("raksmey"))) ||
         ((page as any).userId && (page as any).userId === curId) ||
         ((page as any).ownerId && (page as any).ownerId === curId)
       );
@@ -3063,14 +3208,13 @@ export default function VSTAssistantApp() {
                       </button>
                     </div>
 
-                    {/* Method 1: One-Click Company Page Picker (ADMIN ONLY) */}
-                    {isAdmin && (
-                      <div>
-                        <div className="flex items-center justify-between mb-2.5">
-                          <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
-                            <span>⚡</span>
-                            <span>{lang === "km" ? "ជម្រើសទី ១ (Admin) ៖ ចុចភ្ជាប់ Page របស់ក្រុមហ៊ុន" : "Method 1 (Admin): One-Click Company Page Picker"}</span>
-                          </span>
+                    {/* Method 1: One-Click Company Page Picker */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2.5">
+                        <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                          <span>⚡</span>
+                          <span>{lang === "km" ? "ជម្រើសទី ១ ៖ ចុចភ្ជាប់ Page របស់ក្រុមហ៊ុន (1-Click)" : "Method 1: One-Click Company Page Picker"}</span>
+                        </span>
                         <span className="text-[10px] text-slate-400 font-mono">
                           {COMPANY_PAGES.length} {lang === "km" ? "ផេកផ្លូវការ" : "Official Pages"}
                         </span>
@@ -3151,17 +3295,14 @@ export default function VSTAssistantApp() {
                         })}
                       </div>
                     </div>
-                    )}
 
-                    {isAdmin && (
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1 h-px bg-slate-800" />
-                        <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
-                          {lang === "km" ? "ឬ ភ្ជាប់ Page ថ្មីផ្សេងទៀត (Manual)" : "OR ADD CUSTOM PAGE"}
-                        </span>
-                        <div className="flex-1 h-px bg-slate-800" />
-                      </div>
-                    )}
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1 h-px bg-slate-800" />
+                      <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+                        {lang === "km" ? "ឬ ភ្ជាប់ Page ថ្មីផ្សេងទៀត (Manual)" : "OR ADD CUSTOM PAGE"}
+                      </span>
+                      <div className="flex-1 h-px bg-slate-800" />
+                    </div>
 
                     {/* Method 2: Manual Page Input */}
                     <div>

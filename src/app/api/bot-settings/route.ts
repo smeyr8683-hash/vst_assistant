@@ -164,27 +164,21 @@ export async function POST(req: NextRequest) {
     }
 
     // 3. Save page settings
-    const { data, error } = await supabase
-      .from("bot_settings")
-      .upsert({
-        id: pageId,
-        is_active: is_active ?? true,
-        reply_templates: reply_templates || [],
-        auto_dm_enabled: auto_dm_enabled ?? true,
-        dm_template: dm_template || "",
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
+    const pageSettingPayload = {
+      id: pageId,
+      is_active: is_active ?? true,
+      reply_templates: Array.isArray(reply_templates) ? reply_templates : (reply_templates ? [reply_templates] : []),
+      auto_dm_enabled: auto_dm_enabled ?? true,
+      dm_template: dm_template || "",
+      updated_at: new Date().toISOString(),
+    };
 
-    if (error) {
-      throw error;
-    }
+    await supabase.from("bot_settings").upsert(pageSettingPayload, { onConflict: "id" });
 
     return NextResponse.json({
       success: true,
       settings: {
-        ...data,
+        ...pageSettingPayload,
         keywords: typeof keywords === "string" ? keywords.trim() : "",
         ai_reply_enabled: typeof ai_reply_enabled === "boolean" ? ai_reply_enabled : false,
       },

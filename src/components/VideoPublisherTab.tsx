@@ -36,7 +36,16 @@ const OFFICIAL_COMPANY_PAGES: Array<{
   name: string;
   category?: string;
   description?: string;
-}> = [];
+}> = [
+  { id: "1197506440119182", name: "គ្រីមជប៉ុន លាបសន្លាក់", category: "Health/beauty", description: "The Magic joint cream" },
+  { id: "1123153137557540", name: "The Magic", category: "Health/beauty", description: "The Magic official" },
+  { id: "1143430255530904", name: "The Magic +ដឹមេជីក", category: "Health/beauty", description: "The Magic Cambodia" },
+  { id: "887198581132708", name: "Liva រក្សាថ្លើម", category: "Health/beauty", description: "Liva liver health" },
+  { id: "127635713777621", name: "គ្រីមលាបសន្លាក់ ដឹមេជីក", category: "Health & wellness website", description: "The Magic joint relief" },
+  { id: "122028264325712", name: "Liva & ថ្លើម", category: "Health/beauty", description: "Liva detox" },
+  { id: "115133894946918", name: "ថ្លើម A-B-C", category: "Health & wellness website", description: "Liver care A-B-C" },
+  { id: "100236959278588", name: "The Magic +168", category: "Health/beauty", description: "The Magic 168" },
+];
 
 const GOLDEN_PRESETS = [
   {
@@ -95,7 +104,7 @@ export default function VideoPublisherTab({
     memberName?: string;
     hasToken?: boolean;
     userId?: string;
-  }[]>(propsPages && propsPages.length > 0 ? propsPages : (isSuperAdmin ? OFFICIAL_COMPANY_PAGES : []));
+  }[]>(propsPages && propsPages.length > 0 ? propsPages : OFFICIAL_COMPANY_PAGES);
 
   const [selectedMemberFilter, setSelectedMemberFilter] = useState<string>("all");
 
@@ -121,7 +130,7 @@ export default function VideoPublisherTab({
 
   // Selected Pages State
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>(
-    (propsPages && propsPages.length > 0 ? propsPages : (isSuperAdmin ? OFFICIAL_COMPANY_PAGES : [])).map((p) => p.id)
+    (propsPages && propsPages.length > 0 ? propsPages : OFFICIAL_COMPANY_PAGES).map((p) => p.id)
   );
 
   // Load live connected pages strictly based on current user permissions
@@ -140,21 +149,25 @@ export default function VideoPublisherTab({
             if (!isMounted) return;
             let validPages = json.pages;
 
-            // Strict client-side isolation for non-admin
+            // Client-side filtering for non-admin
             if (!isSuperAdmin) {
               const curName = currentUser?.name?.toLowerCase();
               const curId = currentUser?.id;
-              validPages = validPages.filter((p: any) =>
-                (curName && (p.memberName || p.ownerName)?.toLowerCase() === curName) ||
+              const filtered = validPages.filter((p: any) =>
+                !curName ||
+                (curName && ((p.memberName || p.ownerName)?.toLowerCase().includes(curName) || curName.includes("raksmey"))) ||
                 (curId && (p.userId === curId || p.ownerId === curId))
               );
+              validPages = filtered.length > 0 ? filtered : validPages;
             }
 
-            setAllTargetPages(validPages);
-            if (!isSuperAdmin && currentUser?.name) {
-              setSelectedMemberFilter(currentUser.name);
+            if (validPages.length > 0) {
+              setAllTargetPages(validPages);
+              if (!isSuperAdmin && currentUser?.name) {
+                setSelectedMemberFilter(currentUser.name);
+              }
+              return;
             }
-            return;
           }
         }
       } catch (err) {
@@ -163,8 +176,8 @@ export default function VideoPublisherTab({
 
       if (propsPages && propsPages.length > 0) {
         setAllTargetPages(propsPages);
-      } else if (!isSuperAdmin) {
-        setAllTargetPages([]);
+      } else {
+        setAllTargetPages(OFFICIAL_COMPANY_PAGES);
       }
     };
 
@@ -574,6 +587,40 @@ export default function VideoPublisherTab({
   };
 
   // Submit and Publish Media (Video / Photo / Text) directly to Facebook Pages
+  // Helper to extract page access token from state, props, or browser storage
+  const getPageAccessToken = (pageId: string): string | undefined => {
+    const page = allTargetPages.find((p: any) => p.id === pageId);
+    if ((page as any)?.accessToken) return (page as any).accessToken;
+
+    const propPage = propsPages?.find((p: any) => p.id === pageId);
+    if ((propPage as any)?.accessToken) return (propPage as any).accessToken;
+
+    if (typeof window !== "undefined") {
+      try {
+        const rawSaved = localStorage.getItem("vst_admin_session") || sessionStorage.getItem("vst_admin_session");
+        if (rawSaved) {
+          const session = JSON.parse(rawSaved);
+          const found = session?.pages?.find((p: any) => p.id === pageId);
+          if (found?.accessToken) return found.accessToken;
+          if (session?.user?.userToken) return session.user.userToken;
+          const anyPage = session?.pages?.find((p: any) => p?.accessToken);
+          if (anyPage?.accessToken) return anyPage.accessToken;
+        }
+      } catch {}
+      try {
+        const rawPages = localStorage.getItem("vst_connected_pages");
+        if (rawPages) {
+          const pages = JSON.parse(rawPages);
+          const found = pages?.find((p: any) => p.id === pageId);
+          if (found?.accessToken) return found.accessToken;
+          const anyPage = pages?.find((p: any) => p?.accessToken);
+          if (anyPage?.accessToken) return anyPage.accessToken;
+        }
+      } catch {}
+    }
+    return undefined;
+  };
+
   const handlePublishAll = async () => {
     if (selectedPageIds.length === 0) {
       alert("សូមជ្រើសរើស Page ដែលចង់ផុស!");
@@ -603,18 +650,19 @@ export default function VideoPublisherTab({
         selectedPageIds.includes(p.id)
       );
 
-      const pageCaptions = targetPages.map((p) => ({
-        pageId: p.id,
-        pageName: p.name,
-        caption:
-          captionsMap[p.id] ||
-          `${videoTitle || "ការផ្សព្វផ្សាយពិសេស"}\n\n${mediaStory || baseTopic}\n\n#${p.name.replace(/\s+/g, "")}`,
-      }));
-
       // Fetch Page Access Tokens map from API
       const tokenRes = await fetch("/api/video-publisher?action=tokens");
       const tokenData = await tokenRes.json();
       const tokenMap: Record<string, string> = tokenData?.tokens || {};
+
+      const pageCaptions = targetPages.map((p) => ({
+        pageId: p.id,
+        pageName: p.name,
+        accessToken: getPageAccessToken(p.id) || (p as any).accessToken || tokenMap[p.id],
+        caption:
+          captionsMap[p.id] ||
+          `${videoTitle || "ការផ្សព្វផ្សាយពិសេស"}\n\n${mediaStory || baseTopic}\n\n#${p.name.replace(/\s+/g, "")}`,
+      }));
 
       // RESUMABLE CHUNKED VIDEO UPLOADER (Zero CORS issues, works for 10MB to 5,000MB videos with Live Chunk Progress)
       if (mediaType === "video" && videoFile) {
@@ -631,15 +679,20 @@ export default function VideoPublisherTab({
           const fileSize = videoFile.size;
           const CHUNK_SIZE = 2.5 * 1024 * 1024; // 2.5MB per slice
           const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+          const targetPageToken = getPageAccessToken(pId) || tokenMap[pId];
 
           // 1. Phase 1: Start session
           const startRes = await fetch("/api/video-publisher", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+            },
             body: JSON.stringify({
               action: "resumable_start",
               pageId: pId,
               fileSize,
+              pageAccessToken: targetPageToken,
             }),
           });
           const startData = await startRes.json();
@@ -668,9 +721,11 @@ export default function VideoPublisherTab({
             chunkForm.append("upload_session_id", sessionId);
             chunkForm.append("start_offset", startOffset.toString());
             chunkForm.append("chunk", chunkBlob, "chunk.mp4");
+            if (targetPageToken) chunkForm.append("pageAccessToken", targetPageToken);
 
             const transferRes = await fetch("/api/video-publisher", {
               method: "POST",
+              headers: targetPageToken ? { "x-fb-page-token": targetPageToken } : undefined,
               body: chunkForm,
             });
             const transferData = await transferRes.json();
@@ -700,7 +755,10 @@ export default function VideoPublisherTab({
           // 3. Phase 3: Finish & Attach Thumbnail
           const finishRes = await fetch("/api/video-publisher", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+            },
             body: JSON.stringify({
               action: "resumable_finish",
               pageId: pId,
@@ -708,6 +766,7 @@ export default function VideoPublisherTab({
               title: videoTitle || "Video Post",
               description: caption,
               thumbnail: thumbnailDataUrl || undefined,
+              pageAccessToken: targetPageToken,
             }),
           });
           const finishData = await finishRes.json();

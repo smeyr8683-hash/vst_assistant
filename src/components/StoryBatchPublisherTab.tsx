@@ -33,6 +33,7 @@ interface ConnectedPage {
   picture?: string | null;
   ownerName?: string;
   hasToken?: boolean;
+  accessToken?: string;
 }
 
 interface BatchMediaItem {
@@ -86,6 +87,17 @@ const STORY_FUNNEL_PRESETS = [
   },
 ];
 
+const OFFICIAL_COMPANY_PAGES: ConnectedPage[] = [
+  { id: "1197506440119182", name: "គ្រីមជប៉ុន លាបសន្លាក់", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+  { id: "1123153137557540", name: "The Magic", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+  { id: "1143430255530904", name: "The Magic +ដឹមេជីក", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+  { id: "887198581132708", name: "Liva រក្សាថ្លើម", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+  { id: "127635713777621", name: "គ្រីមលាបសន្លាក់ ដឹមេជីក", category: "Health & wellness website", ownerName: "Chhuon Raksmey" },
+  { id: "122028264325712", name: "Liva & ថ្លើម", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+  { id: "115133894946918", name: "ថ្លើម A-B-C", category: "Health & wellness website", ownerName: "Chhuon Raksmey" },
+  { id: "100236959278588", name: "The Magic +168", category: "Health/beauty", ownerName: "Chhuon Raksmey" },
+];
+
 export default function StoryBatchPublisherTab({
   lang,
   connectedPages = [],
@@ -99,9 +111,19 @@ export default function StoryBatchPublisherTab({
     currentUser?.name === "VST Super Admin";
 
   // 1. Pages state (Supports selecting multiple pages freely)
-  const [pagesList, setPagesList] = useState<ConnectedPage[]>(connectedPages);
+  const [pagesList, setPagesList] = useState<ConnectedPage[]>(
+    connectedPages && connectedPages.length > 0 ? connectedPages : OFFICIAL_COMPANY_PAGES
+  );
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([]);
   const [selectedMemberFilter, setSelectedMemberFilter] = useState<string>("all");
+
+  useEffect(() => {
+    if (connectedPages && connectedPages.length > 0) {
+      setPagesList(connectedPages);
+    } else {
+      setPagesList(OFFICIAL_COMPANY_PAGES);
+    }
+  }, [connectedPages]);
 
   const memberNames = Array.from(
     new Set(pagesList.map((p) => p.ownerName || (p as any).memberName).filter(Boolean))
@@ -321,6 +343,40 @@ export default function StoryBatchPublisherTab({
     }
   };
 
+  // Helper to extract page access token from state, props, or browser storage
+  const getPageAccessToken = (pageId: string): string | undefined => {
+    const page = pagesList.find((p) => p.id === pageId);
+    if (page?.accessToken) return page.accessToken;
+
+    const propPage = connectedPages?.find((p) => p.id === pageId);
+    if (propPage?.accessToken) return propPage.accessToken;
+
+    if (typeof window !== "undefined") {
+      try {
+        const rawSaved = localStorage.getItem("vst_admin_session") || sessionStorage.getItem("vst_admin_session");
+        if (rawSaved) {
+          const session = JSON.parse(rawSaved);
+          const found = session?.pages?.find((p: any) => p.id === pageId);
+          if (found?.accessToken) return found.accessToken;
+          if (session?.user?.userToken) return session.user.userToken;
+          const anyPage = session?.pages?.find((p: any) => p?.accessToken);
+          if (anyPage?.accessToken) return anyPage.accessToken;
+        }
+      } catch {}
+      try {
+        const rawPages = localStorage.getItem("vst_connected_pages");
+        if (rawPages) {
+          const pages = JSON.parse(rawPages);
+          const found = pages?.find((p: any) => p.id === pageId);
+          if (found?.accessToken) return found.accessToken;
+          const anyPage = pages?.find((p: any) => p?.accessToken);
+          if (anyPage?.accessToken) return anyPage.accessToken;
+        }
+      } catch {}
+    }
+    return undefined;
+  };
+
   // Execute Batch / Story Publishing across all selected pages
   const handlePublishBatch = async () => {
     if (selectedPageIds.length === 0) {
@@ -350,6 +406,7 @@ export default function StoryBatchPublisherTab({
       const pId = selectedPageIds[pIdx];
       const targetPage = pagesList.find((p) => p.id === pId);
       if (!targetPage) continue;
+      const targetPageToken = getPageAccessToken(pId);
 
       let completedCount = 0;
       const historyItemResults: any[] = [];
@@ -382,10 +439,14 @@ export default function StoryBatchPublisherTab({
             // Step 1: Start Video Story Session
             const startRes = await fetch("/api/story-publisher", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+              },
               body: JSON.stringify({
                 action: "resumable_story_start",
                 pageId: pId,
+                pageAccessToken: targetPageToken,
               }),
             });
             const startText = await startRes.text();
@@ -426,9 +487,11 @@ export default function StoryBatchPublisherTab({
               chunkForm.append("start_offset", startOffset.toString());
               chunkForm.append("file_size", fileSize.toString());
               chunkForm.append("chunk", chunkBlob, "chunk.mp4");
+              if (targetPageToken) chunkForm.append("pageAccessToken", targetPageToken);
 
               const transferRes = await fetch("/api/story-publisher", {
                 method: "POST",
+                headers: targetPageToken ? { "x-fb-page-token": targetPageToken } : undefined,
                 body: chunkForm,
               });
               const transferText = await transferRes.text();
@@ -451,11 +514,15 @@ export default function StoryBatchPublisherTab({
             // Step 3: Finish and Publish Video Story
             const finishRes = await fetch("/api/story-publisher", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+              },
               body: JSON.stringify({
                 action: "resumable_story_finish",
                 pageId: pId,
                 video_id,
+                pageAccessToken: targetPageToken,
               }),
             });
             const finishText = await finishRes.text();
@@ -479,11 +546,15 @@ export default function StoryBatchPublisherTab({
 
             const startRes = await fetch("/api/video-publisher", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+              },
               body: JSON.stringify({
                 action: "resumable_start",
                 pageId: pId,
                 fileSize,
+                pageAccessToken: targetPageToken,
               }),
             });
             const startData = await startRes.json();
@@ -505,9 +576,11 @@ export default function StoryBatchPublisherTab({
               chunkForm.append("upload_session_id", sessionId);
               chunkForm.append("start_offset", startOffset.toString());
               chunkForm.append("chunk", chunkBlob, "chunk.mp4");
+              if (targetPageToken) chunkForm.append("pageAccessToken", targetPageToken);
 
               const transferRes = await fetch("/api/video-publisher", {
                 method: "POST",
+                headers: targetPageToken ? { "x-fb-page-token": targetPageToken } : undefined,
                 body: chunkForm,
               });
               const transferData = await transferRes.json();
@@ -520,13 +593,17 @@ export default function StoryBatchPublisherTab({
 
             const finishRes = await fetch("/api/video-publisher", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(targetPageToken ? { "x-fb-page-token": targetPageToken } : {}),
+              },
               body: JSON.stringify({
                 action: "resumable_finish",
                 pageId: pId,
                 upload_session_id: sessionId,
                 title: item.title || "Video Post",
                 description: item.caption || "",
+                pageAccessToken: targetPageToken,
               }),
             });
             const finishData = await finishRes.json();
@@ -543,6 +620,7 @@ export default function StoryBatchPublisherTab({
             formData.append("mediaType", item.mediaType);
             formData.append("caption", item.caption || "");
             formData.append("title", item.title || "");
+            if (targetPageToken) formData.append("pageAccessToken", targetPageToken);
 
             if (publishDestination === "story") {
               formData.append("action", "publish_photo_story");
@@ -552,6 +630,7 @@ export default function StoryBatchPublisherTab({
 
             const res = await fetch("/api/story-publisher", {
               method: "POST",
+              headers: targetPageToken ? { "x-fb-page-token": targetPageToken } : undefined,
               body: formData,
             });
 

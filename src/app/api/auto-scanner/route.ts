@@ -22,6 +22,49 @@ export interface CommentActivity {
 
 const repliedCommentIds = new Set<string>();
 
+async function refreshPageToken(pageId: string): Promise<string | null> {
+  const userTokens: string[] = [];
+  try {
+    const { data: memberData } = await supabase
+      .from("bot_settings")
+      .select("dm_template")
+      .eq("id", "vst_members")
+      .maybeSingle();
+
+    if (memberData?.dm_template) {
+      const members = JSON.parse(memberData.dm_template);
+      if (Array.isArray(members)) {
+        for (const m of members) {
+          if (m.accessToken || m.userToken) {
+            userTokens.push(m.accessToken || m.userToken);
+          }
+        }
+      }
+    }
+  } catch {}
+
+  const envToken = process.env.FB_PAGE_ACCESS_TOKEN;
+  if (envToken && !userTokens.includes(envToken)) userTokens.push(envToken);
+
+  for (const uToken of userTokens) {
+    try {
+      const res = await fetch(`https://graph.facebook.com/v21.0/${pageId}?fields=access_token&access_token=${uToken}`);
+      const data = await res.json();
+      if (data.access_token) {
+        try {
+          await supabase.from("bot_settings").upsert({
+            id: pageId,
+            dm_template: data.access_token,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: "id" });
+        } catch {}
+        return data.access_token;
+      }
+    } catch {}
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   if (process.env.ENABLE_BOT_AUTOMATION !== "true") {
     return NextResponse.json({ status: "DISABLED", message: "Bot automation is disabled for publishing tests", totalComments: 0, activities: [] });
@@ -169,13 +212,36 @@ export async function GET(req: NextRequest) {
 
       try {
         const postsList: any[] = [];
+        let pageToken = page.accessToken;
 
         try {
-          const feedRes = await fetch(
-            `https://graph.facebook.com/v21.0/${page.id}/feed?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${page.accessToken}`,
+          let feedRes = await fetch(
+            `https://graph.facebook.com/v21.0/${page.id}/feed?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${pageToken}`,
             { cache: "no-store" }
           );
-          const feedData = await feedRes.json();
+          let feedData = await feedRes.json();
+
+          // Auto-refresh token if expired (code 190)
+          if (
+            feedData?.error &&
+            (feedData.error.code === 190 ||
+              feedData.error.type === "OAuthException" ||
+              feedData.error.message?.toLowerCase().includes("expired") ||
+              feedData.error.message?.toLowerCase().includes("validating access token"))
+          ) {
+            console.warn(`[Auto-Scanner] Token expired for ${page.name} (${page.id}). Refreshing token...`);
+            const fresh = await refreshPageToken(page.id);
+            if (fresh) {
+              pageToken = fresh;
+              page.accessToken = fresh;
+              feedRes = await fetch(
+                `https://graph.facebook.com/v21.0/${page.id}/feed?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${pageToken}`,
+                { cache: "no-store" }
+              );
+              feedData = await feedRes.json();
+            }
+          }
+
           if (feedData.error) {
             const errCode = feedData.error.code;
             if (errCode === 4 || errCode === 17 || errCode === 32 || errCode === 613) {
@@ -188,20 +254,29 @@ export async function GET(req: NextRequest) {
           }
         } catch {}
 
+        // Also fetch recent Videos & Reels to catch Reel comments!
+        try {
+          const videoRes = await fetch(
+            `https://graph.facebook.com/v21.0/${page.id}/videos?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${pageToken}`,
+            { cache: "no-store" }
+          );
+          const videoData = await videoRes.json();
+          if (videoData.data && Array.isArray(videoData.data)) {
+            for (const v of videoData.data) {
+              if (!postsList.some((p) => p.id === v.id)) {
+                postsList.push(v);
+              }
+            }
+          }
+        } catch {}
+
         if (postsList.length === 0) {
           try {
             const fallbackRes = await fetch(
-              `https://graph.facebook.com/v21.0/${page.id}/posts?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${page.accessToken}`,
+              `https://graph.facebook.com/v21.0/${page.id}/posts?fields=id,permalink_url,comments{id,message,from,created_time,comments{id,message,from,created_time}}&limit=10&access_token=${pageToken}`,
               { cache: "no-store" }
             );
             const fallbackData = await fallbackRes.json();
-            if (fallbackData.error) {
-              const errCode = fallbackData.error.code;
-              if (errCode === 4 || errCode === 17 || errCode === 32 || errCode === 613) {
-                console.warn(`[Auto-Scanner] Meta rate limit detected on fallback (${fallbackData.error.message}). Halting scanner.`);
-                break;
-              }
-            }
             if (fallbackData.data && Array.isArray(fallbackData.data)) {
               postsList.push(...fallbackData.data);
             }
@@ -283,11 +358,28 @@ export async function GET(req: NextRequest) {
                   replyMessage = replyTextTemplate.replace(/{name}/g, userTag);
                 }
 
-                const replyRes = await replyToComment({
+                let replyRes = await replyToComment({
                   pageAccessToken: page.accessToken,
                   commentId: commentId,
                   message: replyMessage,
                 });
+
+                if (
+                  replyRes?.error &&
+                  (replyRes.error.code === 190 ||
+                    replyRes.error.type === "OAuthException" ||
+                    replyRes.error.message?.toLowerCase().includes("expired"))
+                ) {
+                  const fresh = await refreshPageToken(page.id);
+                  if (fresh) {
+                    page.accessToken = fresh;
+                    replyRes = await replyToComment({
+                      pageAccessToken: fresh,
+                      commentId: commentId,
+                      message: replyMessage,
+                    });
+                  }
+                }
 
                 if (replyRes.id) {
                   repliedCommentIds.add(commentId);
